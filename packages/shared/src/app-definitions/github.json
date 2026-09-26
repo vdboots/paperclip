@@ -52,13 +52,19 @@
       "ownershipModes": [
         "customer"
       ],
-      "whenToUse": "Use the provider-hosted connection for the quickest setup.",
+      "whenToUse": "Use a GitHub token you create yourself. It works without connecting this instance to Paperclip Cloud and gives MCP, shell Git, and gh the token's access.",
       "defaults": {
         "serverUrl": "https://api.githubcopilot.com/mcp/"
       },
-      "guidanceMd": "Create a fine-grained token limited to the repositories agents should use.",
+      "guidanceMd": "Create a fine-grained token limited to the repositories agents should use. Grant Contents, Pull requests, and Issues read/write (Metadata is read-only by default). Paperclip checks the token with GitHub before saving it. Replace it here before it expires.",
+      "consoleLinks": {
+        "keys": "https://github.com/settings/personal-access-tokens/new"
+      },
       "riskTier": "S3",
       "label": "Personal access token (advanced)",
+      "warnings": [
+        "Shell Git and gh receive this token for the run and are not constrained by per-tool Ask-first controls."
+      ],
       "purpose": "tool",
       "credentialFields": [
         {

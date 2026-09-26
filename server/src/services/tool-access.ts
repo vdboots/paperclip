@@ -2763,6 +2763,95 @@ export async function loadGitHubGrantMetadata(
   };
 }
 
+/**
+ * Verify a pasted GitHub token and describe the account it acts as. A personal
+ * access token has no GitHub App installations: its reach is exactly the
+ * repositories GitHub lists for it, so installation fields stay empty.
+ */
+export async function loadGitHubPersonalAccessTokenMetadata(
+  token: string,
+  request: typeof fetch = fetch,
+) {
+  const headers = { authorization: `Bearer ${token}` };
+  const unreachable = () =>
+    unprocessable("GitHub could not verify this token. Try again.", {
+      code: "github_access_check_failed",
+    });
+  const response = await request("https://api.github.com/user", {
+    headers: {
+      ...headers,
+      accept: "application/vnd.github+json",
+      "user-agent": "Paperclip",
+      "x-github-api-version": "2022-11-28",
+    },
+    signal: AbortSignal.timeout(15_000),
+  }).catch(() => {
+    throw unreachable();
+  });
+  if (!response.ok) {
+    throw unprocessable(
+      response.status === 401
+        ? "GitHub rejected this token. Check that it is correct and has not expired."
+        : "GitHub could not verify this token. Try again.",
+      {
+        code:
+          response.status === 401
+            ? "github_token_invalid"
+            : "github_access_check_failed",
+      },
+    );
+  }
+  const user = (await response.json()) as unknown;
+  const userId = recordValue(user) ? githubId(user.id) : null;
+  const login =
+    recordValue(user) && typeof user.login === "string" ? user.login : null;
+  if (!recordValue(user) || !userId || !login)
+    throw unprocessable("GitHub returned invalid account metadata", {
+      code: "github_bad_response",
+    });
+  const repositories = await loadGitHubTokenRepositories(headers, request).catch(
+    (error: unknown) => {
+      throw error instanceof HttpError ? error : unreachable();
+    },
+  );
+  return {
+    userId,
+    login,
+    ...(typeof user.avatar_url === "string"
+      ? { avatarUrl: user.avatar_url }
+      : {}),
+    credentialKind: "personal_access_token" as const,
+    installationCount: 0,
+    repositoryCount: repositories.length,
+    repositorySelection: repositories.length > 0 ? ("selected" as const) : ("none" as const),
+    installationIds: [],
+    installationOwnerLogins: [
+      ...new Set(repositories.map((repository) => repository.fullName.split("/")[0]!)),
+    ],
+    repositories: repositories
+      .map((repository) => ({ ...repository, installationId: "" }))
+      .sort((a, b) => a.fullName.localeCompare(b.fullName)),
+    managementUrl: "https://github.com/settings/personal-access-tokens",
+    lastAccessRefreshAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Optimistic-concurrency check for a grant read earlier in the same request.
+ * Postgres keeps microseconds but a JS Date holds milliseconds, so compare at
+ * the precision the application actually read.
+ */
+function grantUpdatedAtMatches(updatedAt: Date) {
+  return sql`date_trunc('milliseconds', ${connectionGrants.updatedAt}) = ${updatedAt.toISOString()}::timestamptz`;
+}
+
+export function isGitHubPersonalAccessTokenMethod(
+  appSlug: string | null | undefined,
+  methodKey: string | null | undefined,
+) {
+  return appSlug === "github" && methodKey === "mcp-key";
+}
+
 function githubInstallationManagementUrl(value: unknown): string | null {
   if (typeof value !== "string" || value.length > 2_000) return null;
   try {
@@ -6595,6 +6684,27 @@ export function toolAccessService(
         .limit(2);
       if (personalGrants.length === 1) return personalGrants[0]!;
     }
+    if (
+      connection.credentialPolicy === "per_agent" &&
+      connection.authKind !== "oauth"
+    ) {
+      // A pasted dedicated credential belongs to exactly one agent. Setup and
+      // background health/catalog checks exercise that sole grant; agent runs
+      // resolve their own grant in the gateway.
+      const agentGrants = await db
+        .select()
+        .from(connectionGrants)
+        .where(
+          and(
+            eq(connectionGrants.companyId, connection.companyId),
+            eq(connectionGrants.connectionId, connection.id),
+            eq(connectionGrants.kind, "agent"),
+            eq(connectionGrants.status, "active"),
+          ),
+        )
+        .limit(2);
+      if (agentGrants.length === 1) return agentGrants[0]!;
+    }
     const [organization] = await db
       .select()
       .from(connectionGrants)
@@ -7206,7 +7316,11 @@ export function toolAccessService(
   async function checkConnectionHealth(
     connectionId: string,
     actor?: ActorInfo,
-    options: { allowUnauthenticatedProbe?: boolean } = {},
+    options: {
+      allowUnauthenticatedProbe?: boolean;
+      /** Setup has just verified a pasted GitHub token; do not rewrite its grant. */
+      skipGitHubTokenRefresh?: boolean;
+    } = {},
   ): Promise<ToolConnectionHealthCheckResult> {
     const connection = await getConnectionRow(connectionId);
     if (connection.connectionPurpose === "ai") return { connection: toConnection(connection), runtimeSlot: null };
@@ -7254,6 +7368,15 @@ export function toolAccessService(
       } else if (isAgentMailConnection(connection)) {
         await validateAgentMailConnection(connection);
       } else if (connection.transport === "mcp_remote") {
+        if (
+          !options.skipGitHubTokenRefresh &&
+          isGitHubPersonalAccessTokenMethod(
+            typeof config.sourceTemplateKey === "string" ? config.sourceTemplateKey : null,
+            typeof config.connectionMethodKey === "string" ? config.connectionMethodKey : null,
+          )
+        ) {
+          await refreshGitHubTokenGrantAccess(connection, actor);
+        }
         const canProbeWithoutAuthorization =
           options.allowUnauthenticatedProbe === true &&
           connection.status === "draft" &&
@@ -11777,6 +11900,78 @@ export function toolAccessService(
     return updated;
   }
 
+  /**
+   * Re-verify pasted GitHub tokens that back a personal or dedicated identity
+   * and record the account and repositories GitHub reports for them now. A
+   * token GitHub rejects marks its grant for reconnection so runs fail with a
+   * clear reason instead of a Git authentication error.
+   */
+  async function refreshGitHubTokenGrantAccess(
+    connection: typeof toolConnections.$inferSelect,
+    actor?: ActorInfo,
+  ) {
+    const grants = await db
+      .select()
+      .from(connectionGrants)
+      .where(
+        and(
+          eq(connectionGrants.companyId, connection.companyId),
+          eq(connectionGrants.connectionId, connection.id),
+          eq(connectionGrants.status, "active"),
+          inArray(connectionGrants.kind, ["user", "agent"]),
+        ),
+      );
+    const actorUserId = actor?.actorType === "user" ? actor.actorId : null;
+    for (const grant of grants) {
+      // Only the owner exercises a personal token from an interactive check.
+      if (grant.kind === "user" && actorUserId && grant.subjectUserId !== actorUserId)
+        continue;
+      const ref = grant.credentialSecretRefs.find(
+        (candidate) => candidate.configPath === "credentials.authorization",
+      );
+      if (!ref) continue;
+      const token = (
+        await resolveOAuthGrantSecret(connection, grant, ref, actor, undefined)
+      ).value.trim();
+      let metadata: Awaited<ReturnType<typeof loadGitHubPersonalAccessTokenMetadata>>;
+      try {
+        metadata = await loadGitHubPersonalAccessTokenMetadata(token);
+      } catch (error) {
+        if (
+          error instanceof HttpError &&
+          asRecord(error.details).code === "github_token_invalid"
+        ) {
+          await db
+            .update(connectionGrants)
+            .set({ status: "needs_reauthorization", updatedAt: now() })
+            .where(
+              and(
+                eq(connectionGrants.id, grant.id),
+                eq(connectionGrants.companyId, grant.companyId),
+              ),
+            );
+        }
+        throw error;
+      }
+      await db
+        .update(connectionGrants)
+        .set({
+          providerTenant: {
+            ...(grant.providerTenant ?? {}),
+            name: metadata.login,
+            github: metadata,
+          },
+          updatedAt: now(),
+        })
+        .where(
+          and(
+            eq(connectionGrants.id, grant.id),
+            eq(connectionGrants.companyId, grant.companyId),
+          ),
+        );
+    }
+  }
+
   async function sweepGitHubConnectionContinuity() {
     if (now().getTime() < nextGitHubContinuitySweepAt) {
       return { checked: 0, due: 0, refreshed: 0, failed: 0 };
@@ -12470,6 +12665,18 @@ export function toolAccessService(
         "Connecting an app as yourself requires a signed-in user",
       );
     }
+    // A pasted GitHub token backs the same personal or dedicated identity a
+    // managed sign-in does, so shell Git and gh can use it without Paperclip
+    // Cloud. Verify it with GitHub before any secret is stored. A reconnect that
+    // keeps the stored token keeps the grant's existing account metadata.
+    const githubTokenValue = credentialValues["credentials.authorization"]?.trim();
+    const githubTokenIdentity =
+      isGitHubPersonalAccessTokenMethod(galleryEntry?.slug, method?.key) &&
+      credentialSource === "paperclip_vault" &&
+      requestedGrantKind !== "organization" &&
+      githubTokenValue
+        ? await loadGitHubPersonalAccessTokenMetadata(githubTokenValue)
+        : null;
     const retainedPersonalIdentity =
       retainedConnection?.credentialPolicy === "per_user"
         ? await fixedPersonalIdentityForReconnect(
@@ -12849,6 +13056,15 @@ export function toolAccessService(
               .update(connectionGrants)
               .set({
                 credentialSecretRefs,
+                ...(githubTokenIdentity
+                  ? {
+                      providerTenant: {
+                        ...(currentGrant.providerTenant ?? {}),
+                        name: githubTokenIdentity.login,
+                        github: githubTokenIdentity,
+                      },
+                    }
+                  : {}),
                 status: "active",
                 revokedAt: null,
                 revokedByAgentId: null,
@@ -12858,7 +13074,7 @@ export function toolAccessService(
               .where(
                 and(
                   eq(connectionGrants.id, currentGrant.id),
-                  eq(connectionGrants.updatedAt, currentGrant.updatedAt),
+                  grantUpdatedAtMatches(currentGrant.updatedAt),
                 ),
               )
               .returning();
@@ -12875,6 +13091,14 @@ export function toolAccessService(
                 kind: "user",
                 subjectUserId: personalIdentityUserId,
                 credentialSecretRefs,
+                ...(githubTokenIdentity
+                  ? {
+                      providerTenant: {
+                        name: githubTokenIdentity.login,
+                        github: githubTokenIdentity,
+                      },
+                    }
+                  : {}),
                 status: "active",
                 isDefault: false,
                 createdByUserId: personalIdentityUserId,
@@ -12910,6 +13134,93 @@ export function toolAccessService(
       } else if (dedicatedAgentId) {
         // Managed OAuth creates the credential-bearing grant in the callback.
         // Keep the connection free of organization secrets from the outset.
+        // A pasted credential (for example a GitHub token for a bot account)
+        // has no callback, so commit it straight to the agent's own grant.
+        if (method?.auth !== "oauth" && credentialSecretRefs.length > 0) {
+          const [currentGrant] = await db
+            .select()
+            .from(connectionGrants)
+            .where(
+              and(
+                eq(connectionGrants.companyId, companyId),
+                eq(connectionGrants.connectionId, connectionRow.id),
+                eq(connectionGrants.kind, "agent"),
+                eq(connectionGrants.subjectAgentId, dedicatedAgentId),
+              ),
+            )
+            .limit(1);
+          const grantValues = {
+            credentialSecretRefs,
+            ...(githubTokenIdentity
+              ? {
+                  providerTenant: {
+                    ...(currentGrant?.providerTenant ?? {}),
+                    name: githubTokenIdentity.login,
+                    github: githubTokenIdentity,
+                  },
+                }
+              : {}),
+            status: "active" as const,
+            revokedAt: null,
+            revokedByAgentId: null,
+            revokedByUserId: null,
+            updatedAt: new Date(),
+          };
+          const [changedGrant] = currentGrant
+            ? await db
+                .update(connectionGrants)
+                .set(grantValues)
+                .where(
+                  and(
+                    eq(connectionGrants.id, currentGrant.id),
+                    grantUpdatedAtMatches(currentGrant.updatedAt),
+                  ),
+                )
+                .returning()
+            : await db
+                .insert(connectionGrants)
+                .values({
+                  companyId,
+                  connectionId: connectionRow.id,
+                  kind: "agent",
+                  subjectAgentId: dedicatedAgentId,
+                  subjectUserId: null,
+                  ...grantValues,
+                  isDefault: false,
+                  createdByUserId:
+                    actor?.actorType === "user" ? (actor.actorId ?? null) : null,
+                  createdByAgentId:
+                    actor?.actorType === "agent" ? (actor.actorId ?? null) : null,
+                })
+                .returning();
+          if (!changedGrant)
+            throw conflict(
+              "The dedicated credential changed during setup. Please try again.",
+            );
+          if (revivedConnectionPrevious) {
+            revivedGrantMutation = {
+              previous: currentGrant ?? null,
+              current: changedGrant,
+            };
+          }
+          await db.insert(toolAccessAuditEvents).values({
+            companyId,
+            connectionId: connectionRow.id,
+            actorType: actor?.actorType ?? "system",
+            actorId: actor?.actorId ?? null,
+            action: currentGrant
+              ? "connection_grant.updated"
+              : "connection_grant.created",
+            outcome: "success",
+            reasonCode: currentGrant
+              ? "dedicated_identity_reconnected"
+              : "dedicated_identity_created",
+            details: {
+              kind: "agent",
+              credentialSecretRefCount: credentialSecretRefs.length,
+            },
+          });
+        }
       } else {
         const organizationGrant = await ensureDefaultOrganizationGrant(
           connectionRow,
@@ -13018,6 +13329,7 @@ export function toolAccessService(
       try {
         health = await checkConnectionHealth(connectionRow.id, actor, {
           allowUnauthenticatedProbe: unauthenticatedPersonalProbe,
+          skipGitHubTokenRefresh: true,
         });
       } catch (error) {
         if (

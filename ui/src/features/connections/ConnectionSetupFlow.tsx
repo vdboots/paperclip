@@ -993,14 +993,32 @@ function StandardConnectionSetupFlow({
       || candidate.oauthStrategy === "paperclip_id_connector"
     ),
   );
+  // A provider that also ships a pasted-credential method (GitHub's personal
+  // access token) can connect without Paperclip Cloud. Setup offers it as an
+  // explicit alternative to enrollment and never switches to it silently.
+  const [credentialFallbackAppKey, setCredentialFallbackAppKey] = useState<string | null>(null);
+  const managedCredentialFallbackMethod = entry
+    && requestedDefinitionUsesManagedConnector
+    && !entryAdvertisesManagedConnector
+    ? entry.methods.find((candidate) =>
+        candidate.auth === "api_key"
+        && candidate.purpose !== "channel"
+        && candidate.transport !== "chat_sdk"
+        && Boolean(candidate.credentialFields?.length),
+      ) ?? null
+    : null;
+  const usingManagedCredentialFallback = Boolean(
+    entry && managedCredentialFallbackMethod && credentialFallbackAppKey === entry.slug,
+  );
   // Before a self-hosted instance enrolls, the server intentionally withholds
   // platform-managed methods from the advertised gallery. The setup route still
   // needs the managed method's identity model, labels, and defaults because the
   // next step is enrollment for that exact method—not the visible PAT/BYO
-  // compatibility fallback.
+  // compatibility fallback, unless the operator explicitly chose it.
   const preEnrollmentManagedMethod = entry
     && requestedDefinitionUsesManagedConnector
     && !entryAdvertisesManagedConnector
+    && !usingManagedCredentialFallback
     ? recommendedManagedConnectorMethod(fullRequestedDefinition)
     : null;
   const [enrollmentAuthorizationUrl, setEnrollmentAuthorizationUrl] = useState<string | null>(null);
@@ -1919,6 +1937,7 @@ function StandardConnectionSetupFlow({
     && entry
     && requestedDefinitionUsesManagedConnector
     && !entryAdvertisesManagedConnector
+    && !usingManagedCredentialFallback
     && connectorEnrollmentQuery.data?.configured === true
   );
 
@@ -1927,12 +1946,35 @@ function StandardConnectionSetupFlow({
     && entry
     && requestedDefinitionUsesManagedConnector
     && !entryAdvertisesManagedConnector
+    && !usingManagedCredentialFallback
     && (
       connectorEnrollmentQuery.isLoading
       || connectorEnrollmentQuery.isError
       || connectorEnrollmentQuery.data?.configured !== true
     )
   );
+
+  const chooseManagedCredentialFallback = () => {
+    if (!entry || !managedCredentialFallbackMethod) return;
+    setCredentialFallbackAppKey(entry.slug);
+    setConnectionMethodKey(managedCredentialFallbackMethod.key);
+    setCredentials({});
+    setConfigValues(defaultMethodConfig(managedCredentialFallbackMethod));
+    setConnectorEnrollmentError(null);
+  };
+  const managedCredentialFallbackOption = entry && managedCredentialFallbackMethod ? (
+    <p className="mt-6 border-t border-border pt-4 text-sm text-muted-foreground">
+      Prefer not to connect this instance to Paperclip?{" "}
+      <Button
+        type="button"
+        variant="link"
+        className="h-auto p-0 text-sm underline underline-offset-2"
+        onClick={chooseManagedCredentialFallback}
+      >
+        {entry.slug === "github" ? "Use a personal access token instead" : "Use an API key instead"}
+      </Button>
+    </p>
+  ) : null;
 
   if (showCuratedOAuthState && automaticOAuthEntry) {
     return (
@@ -2208,6 +2250,7 @@ function StandardConnectionSetupFlow({
               Try again
             </Button>
           </div>
+          {managedCredentialFallbackOption}
         </div>
       ) : step === "key" && entry && showConnectorEnrollmentStep ? (
         <div className="mx-auto max-w-xl">
@@ -2262,6 +2305,7 @@ function StandardConnectionSetupFlow({
                   : "Connect with Paperclip"}
               </Button>
             </div>
+            {managedCredentialFallbackOption}
           </div>
         </div>
       ) : step === "key" && entry && credentialStep !== undefined ? credentialStep : step === "key" && entry ? (
@@ -2306,8 +2350,12 @@ function StandardConnectionSetupFlow({
           }}
           submitting={connectMutation.isPending}
           // Back returns to Access for new, resumed, and reconnected accounts.
-          // Cancel is the separate exit to the connector list.
-          onBack={() => setAppStep("access")}
+          // Cancel is the separate exit to the connector list. Leaving a chosen
+          // credential fallback restores the managed identity choices.
+          onBack={() => {
+            setCredentialFallbackAppKey(null);
+            setAppStep("access");
+          }}
           onConnect={() => {
             if (isGoogleSheetsRobotMethod(entry, connectionMethodKey)) {
               const parsed = parseGoogleSheetIds(googleSheetsLinks);

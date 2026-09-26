@@ -18,6 +18,9 @@ const SENSITIVE_KEYS = new Set<string>([
   // sync with every connector.
   "credential",
   "credentials",
+  // Gallery app setup sends pasted keys as `credentialValues`, keyed by config
+  // paths such as `credentials.authorization` that match no single key above.
+  "credentialvalues",
   "password",
   "currentpassword",
   "newpassword",

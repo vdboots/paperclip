@@ -20,6 +20,36 @@ If an unapproved enrollment link expires, return to setup and select
 live pending enrollment or replaces an expired one; this does not revoke or
 repeat an existing instance approval.
 
+### Personal access token instead of Paperclip Cloud
+
+The **Connect with Paperclip** step also offers **Use a personal access token
+instead**. It is an explicit choice; setup never switches to it silently. The
+token path never contacts Paperclip Cloud, so it also works on an instance
+that is not enrolled.
+
+The token backs the same identity chosen on Access: **My GitHub account**
+stores it as a user-scoped secret on the owner's personal grant, and **A
+dedicated account for an agent** stores it on that agent's grant. Before any
+secret is stored, Paperclip calls GitHub's `/user` and `/user/repos` with the
+token. A rejected token fails setup with `github_token_invalid`. The grant
+records the account, the accessible repositories, and
+`providerTenant.github.credentialKind: "personal_access_token"`.
+
+Runs resolve that grant exactly like a managed sign-in (see below), so MCP
+tools, shell Git, and `gh` all use the token. A token has no GitHub App
+installations, so the installation requirement does not apply to it; GitHub
+enforces the token's own repository scope. The token does not refresh
+automatically. A health check (**Refresh access**) re-verifies it, and a token
+GitHub rejects marks its grant `needs_reauthorization` until it is replaced.
+Webhook-driven updates are not available for token connections.
+
+Prefer a fine-grained token limited to the repositories agents should use,
+with Contents, Pull requests, and Issues read/write.
+
+A token connected as a **Shared organization GitHub account** remains an
+MCP-only credential. It is not a Git identity and, like any configured GitHub
+connection, it disables the legacy token fallback.
+
 ## Identity resolution
 
 Every MCP call, `gh` invocation, native Git operation, checkout, health check,
@@ -98,7 +128,8 @@ and provider enablement are separate: enrollment alone does not enable GitHub
 OAuth. Production must advertise the `github.code` profile (see Cloud's
 `docs/github-connector-deploy-bootstrap.md`). If it is unavailable, setup
 preserves the sign-in intent and offers a retry instead of silently switching
-to a personal access token. A successful retry preserves the chosen audience.
+to a personal access token; the operator can still choose the token path
+explicitly. A successful retry preserves the chosen audience.
 
 ## GitHub Actions tools
 

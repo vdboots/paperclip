@@ -293,6 +293,29 @@ export function createGitRemoteAuthProvider(
   };
 }
 
+type GitHubIdentityGrant = typeof connectionGrants.$inferSelect;
+
+/**
+ * The secret ref that holds a GitHub identity's token: the OAuth access token
+ * from a managed sign-in, or the pasted personal access token.
+ */
+export function githubGrantTokenRef(grant: GitHubIdentityGrant) {
+  const pat = grant.providerTenant?.github?.credentialKind === "personal_access_token";
+  return grant.credentialSecretRefs.find((ref) =>
+    ref.configPath === (pat ? "credentials.authorization" : "oauth.access_token"),
+  );
+}
+
+/**
+ * GitHub App user tokens reach repositories only through installations. A
+ * personal access token has none; GitHub enforces its repository scope.
+ */
+function githubGrantHasRepositoryAccess(github: NonNullable<GitHubIdentityGrant["providerTenant"]>["github"]) {
+  if (!github) return false;
+  return github.credentialKind === "personal_access_token"
+    || (github.installationCount > 0 && github.repositoryCount > 0);
+}
+
 export async function resolveManagedGitHubIdentitySelection(
   db: Db,
   companyId: string,
@@ -377,8 +400,10 @@ export async function resolveManagedGitHubIdentitySelection(
         : "More than one managed GitHub identity matches this run",
     };
   }
-  const credentialIds = candidates.flatMap((grant) => grant.credentialSecretRefs
-    .filter((ref) => ref.configPath === "oauth.access_token").map((ref) => ref.secretId));
+  const credentialIds = candidates.flatMap((grant) => {
+    const ref = githubGrantTokenRef(grant);
+    return ref ? [ref.secretId] : [];
+  });
   const credentialRecords = candidates.length > 1 && credentialIds.length > 0
     ? await db.select({
         id: companySecrets.id, status: companySecrets.status, deletedAt: companySecrets.deletedAt,
@@ -393,9 +418,8 @@ export async function resolveManagedGitHubIdentitySelection(
     : [];
   const hasCredentialRecord = (grant: typeof connectionGrants.$inferSelect) => {
     if (candidates.length === 1) return true;
-    const github = grant.providerTenant?.github;
-    const ref = grant.credentialSecretRefs.find((ref) => ref.configPath === "oauth.access_token");
-    return Boolean(github && github.installationCount > 0 && github.repositoryCount > 0 && ref
+    const ref = githubGrantTokenRef(grant);
+    return Boolean(githubGrantHasRepositoryAccess(grant.providerTenant?.github) && ref
       && credentialRecords.some((secret) => secret.id === ref.secretId
         && secret.status === "active" && !secret.deletedAt
         && (grant.kind === "user"
@@ -505,10 +529,10 @@ export async function resolveManagedGitHubCredential(
         heartbeatRunId: context.heartbeatRunId,
       });
     }
-    const accessRef = grant.credentialSecretRefs.find((ref) => ref.configPath === "oauth.access_token");
+    const accessRef = githubGrantTokenRef(grant);
     const github = grant.providerTenant?.github;
     if (!accessRef || !github) return { configured: true, identitySource: selection.identitySource, error: "The managed GitHub identity is incomplete" };
-    if (github.installationCount < 1 || github.repositoryCount < 1) {
+    if (!githubGrantHasRepositoryAccess(github)) {
       return { configured: true, identitySource: selection.identitySource, error: "The managed GitHub identity no longer has repository access" };
     }
     const accessContext = {

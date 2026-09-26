@@ -226,6 +226,7 @@ export const connectionGrantSchema = z.object({
       userId: z.string().regex(/^[1-9][0-9]{0,30}$/),
       login: z.string().trim().min(1).max(100),
       avatarUrl: z.string().url().max(2000).optional(),
+      credentialKind: z.literal("personal_access_token").optional(),
       installationCount: z.number().int().nonnegative(),
       repositoryCount: z.number().int().nonnegative(),
       repositorySelection: z.enum(["all", "selected", "mixed", "none"]),
