@@ -594,6 +594,65 @@ const support = await getEmbeddedPostgresTestSupport();
         env: {},
       });
     });
+    it("exports a pasted personal access token as the personal or dedicated GitHub identity", async () => {
+      const input = await seed();
+      const tokenGitHub = (login: string) => ({
+        userId: login,
+        login,
+        credentialKind: "personal_access_token" as const,
+        installationCount: 0,
+        repositoryCount: 0,
+        repositorySelection: "none" as const,
+        installationIds: [],
+        installationOwnerLogins: [],
+      });
+      const useTokenGrant = async (
+        created: Awaited<ReturnType<typeof grant>>,
+        login: string,
+      ) =>
+        db
+          .update(connectionGrants)
+          .set({
+            credentialSecretRefs: [
+              {
+                secretId: created.secretId,
+                configPath: "credentials.authorization",
+                versionSelector: "latest",
+              },
+            ],
+            providerTenant: { name: login, github: tokenGitHub(login) },
+          })
+          .where(eq(connectionGrants.id, created.id));
+      const personal = await grant(input, "A");
+      await useTokenGrant(personal, "A");
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "available",
+        source: "personal",
+        login: "A",
+        env: { GH_TOKEN: "test-token-A", GIT_AUTHOR_NAME: "A" },
+      });
+
+      // Only a token grant waives installation access; a GitHub App grant
+      // without its OAuth token stays incomplete.
+      const { credentialKind: _kind, ...appGitHub } = tokenGitHub("A");
+      await db
+        .update(connectionGrants)
+        .set({ providerTenant: { github: appGitHub } })
+        .where(eq(connectionGrants.id, personal.id));
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "unavailable",
+        env: {},
+      });
+
+      const dedicated = await grant(input, "robot", true);
+      await useTokenGrant(dedicated, "robot");
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "available",
+        source: "dedicated",
+        login: "robot",
+        env: { GH_TOKEN: "test-dedicated-token" },
+      });
+    });
     it("does not resolve the company default person's GitHub", async () => {
       const input = await seed();
       await grant(input, "A");

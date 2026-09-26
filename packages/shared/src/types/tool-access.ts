@@ -229,6 +229,8 @@ export interface ConnectionGrant {
       userId: string;
       login: string;
       avatarUrl?: string;
+      /** Absent for GitHub App user tokens; set for pasted personal access tokens. */
+      credentialKind?: "personal_access_token";
       installationCount: number;
       repositoryCount: number;
       repositorySelection: "all" | "selected" | "mixed" | "none";

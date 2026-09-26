@@ -70,6 +70,20 @@ describe("redactSensitive", () => {
     expect(JSON.stringify(out)).not.toContain("canary");
   });
 
+  it("drops gallery connect credential values keyed by config path", () => {
+    const out = redactSensitive({
+      galleryKey: "github",
+      connectionMethodKey: "mcp-key",
+      credentialValues: { "credentials.authorization": "github_pat_example" },
+    }) as Record<string, unknown>;
+
+    expect(out).toEqual({
+      galleryKey: "github",
+      connectionMethodKey: "mcp-key",
+      credentialValues: "[REDACTED]",
+    });
+  });
+
   it("removes raw, JSON-escaped, and URL-encoded submitted credentials from prose", () => {
     const credential = "secret value/with\nnewline";
     const submittedValues = collectSensitiveStringValues({

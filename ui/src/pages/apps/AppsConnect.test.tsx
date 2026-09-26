@@ -1247,6 +1247,53 @@ describe("AppsConnect — Connect with a link (M4 frame)", () => {
     expect(container.textContent).not.toContain("GitHub token");
   });
 
+  it("connects GitHub with a personal access token when the operator skips enrollment", async () => {
+    mockParams.appKey = "github";
+    listGalleryMock.mockResolvedValue({
+      apps: [{
+        ...GITHUB,
+        methods: GITHUB.methods.filter((method) => !method.oauthStrategy),
+        ownershipAvailability: { platform_shared: false, customer: true, dcr: true },
+      }],
+    });
+    getCloudConnectorEnrollmentMock.mockResolvedValue({
+      configured: false,
+      status: "not_configured",
+      brokerBaseUrl: "https://my-staging.paperclip.app",
+      instanceId: null,
+      environment: "staging",
+      origins: [],
+    });
+
+    await render();
+    await passAccessStep();
+
+    expect(container.textContent).toContain("Connect with Paperclip");
+    await act(async () => {
+      buttonByText("Use a personal access token instead")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+
+    expect(container.textContent).not.toContain("Connect with Paperclip");
+    const keyField = container.querySelector<HTMLInputElement>("input[type=password]");
+    expect(keyField).not.toBeNull();
+    await act(async () => setInputValue(keyField!, "github_pat_example"));
+    await flushReact();
+    await act(async () => {
+      buttonByText("Connect")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+
+    expect(startCloudConnectorEnrollmentMock).not.toHaveBeenCalled();
+    expect(connectAppMock).toHaveBeenCalledTimes(1);
+    expect(connectAppMock.mock.calls[0]?.[1]).toMatchObject({
+      galleryKey: "github",
+      connectionMethodKey: "mcp-key",
+      grantKind: "user",
+      credentialValues: { "credentials.authorization": "github_pat_example" },
+    });
+  });
+
   it("restores the setup step after the one-time enrollment callback", async () => {
     mockSearch.value = "source=github&stage=setup&cloud_connector=enrolled";
     listGalleryMock.mockResolvedValueOnce({ apps: [GITHUB_MANAGED] });

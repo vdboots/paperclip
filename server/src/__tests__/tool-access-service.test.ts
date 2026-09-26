@@ -322,8 +322,20 @@ function mcpSseResponse(payload: unknown): Response {
   });
 }
 
+/** GitHub's account and repository endpoints, which verify a pasted GitHub token. */
+function githubTokenApiResponse(url: unknown): Response | null {
+  const href = url instanceof Request ? url.url : String(url);
+  if (href === "https://api.github.com/user")
+    return Response.json({ id: 583231, login: "octocat" });
+  if (href.startsWith("https://api.github.com/user/repos"))
+    return Response.json([{ id: 1296269, full_name: "octocat/Hello-World", private: false }]);
+  return null;
+}
+
 function mockToolsList(tools: unknown[]) {
-  return vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+  return vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    const githubResponse = githubTokenApiResponse(url);
+    if (githubResponse) return githubResponse;
     const body = JSON.parse(String(init?.body));
     if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
     return mcpHttpResponse({ jsonrpc: "2.0", id: body.id,
@@ -13456,7 +13468,9 @@ describeEmbeddedPostgres("tool access service", () => {
       first.connectionId,
       company.id,
     );
-    fetchMock.mockRejectedValue(new Error("provider unavailable"));
+    fetchMock.mockImplementation(async (url) =>
+      githubTokenApiResponse(url) ?? Promise.reject(new Error("provider unavailable")),
+    );
 
     await expect(
       service.connectGalleryApp(
@@ -13514,7 +13528,9 @@ describeEmbeddedPostgres("tool access service", () => {
       actor,
     );
     await service.archiveConnection(first.connectionId, company.id, actor);
-    fetchMock.mockImplementation(async () => {
+    fetchMock.mockImplementation(async (url) => {
+      const githubResponse = githubTokenApiResponse(url);
+      if (githubResponse) return githubResponse;
       const [personalGrant] = await db
         .select()
         .from(connectionGrants)
@@ -13603,7 +13619,9 @@ describeEmbeddedPostgres("tool access service", () => {
       actor,
     );
     await service.archiveConnection(first.connectionId, company.id, actor);
-    fetchMock.mockImplementation(async () => {
+    fetchMock.mockImplementation(async (url) => {
+      const githubResponse = githubTokenApiResponse(url);
+      if (githubResponse) return githubResponse;
       const concurrentUpdateAt = new Date(Date.now() + 2_000);
       const [connection] = await db
         .select()
@@ -13693,7 +13711,9 @@ describeEmbeddedPostgres("tool access service", () => {
       actor,
     );
     await service.archiveConnection(first.connectionId, company.id, actor);
-    fetchMock.mockRejectedValue(new Error("provider unavailable"));
+    fetchMock.mockImplementation(async (url) =>
+      githubTokenApiResponse(url) ?? Promise.reject(new Error("provider unavailable")),
+    );
     const runTransaction = db.transaction.bind(db);
     vi.spyOn(db, "transaction")
       .mockImplementationOnce(runTransaction)
@@ -15633,6 +15653,175 @@ describeEmbeddedPostgres("tool access service", () => {
         selectors: { catalogEntryId: updateEntry.id },
       }),
     ]);
+  });
+
+  it("verifies a pasted GitHub token and records it as a personal GitHub identity", async () => {
+    const company = await createCompany(db);
+    const service = createTestToolAccessService(db);
+    const userId = `github-token-${randomUUID()}`;
+    const fetchMock = mockToolsList([
+      { name: "get_file_contents", annotations: { readOnlyHint: true } },
+    ]);
+
+    const connected = await service.connectGalleryApp(
+      company.id,
+      {
+        galleryKey: "github",
+        connectionMethodKey: "mcp-key",
+        grantKind: "user",
+        credentialValues: { "credentials.authorization": "github_pat_personal" },
+      },
+      { actorType: "user", actorId: userId },
+    );
+
+    const { grants } = await service.listConnectionGrants(
+      connected.connectionId,
+      company.id,
+    );
+    expect(grants).toHaveLength(1);
+    expect(grants[0]).toMatchObject({
+      kind: "user",
+      subjectUserId: userId,
+      status: "active",
+      providerTenant: {
+        name: "octocat",
+        github: {
+          userId: "583231",
+          login: "octocat",
+          credentialKind: "personal_access_token",
+          repositoryCount: 1,
+          installationIds: [],
+        },
+      },
+    });
+    expect(grants[0]!.credentialSecretRefs.map((ref) => ref.configPath)).toEqual([
+      "credentials.authorization",
+    ]);
+    const verification = fetchMock.mock.calls.find(
+      ([url]) => String(url) === "https://api.github.com/user",
+    );
+    expect(
+      new Headers(verification?.[1]?.headers).get("authorization"),
+    ).toBe("Bearer github_pat_personal");
+  });
+
+  it("retries an unfinished personal GitHub token setup on the same grant", async () => {
+    const company = await createCompany(db);
+    const service = createTestToolAccessService(db);
+    const userId = `github-token-retry-${randomUUID()}`;
+    mockToolsList([
+      { name: "get_file_contents", annotations: { readOnlyHint: true } },
+    ]);
+    const connect = (token: string) =>
+      service.connectGalleryApp(
+        company.id,
+        {
+          galleryKey: "github",
+          connectionMethodKey: "mcp-key",
+          grantKind: "user",
+          credentialValues: { "credentials.authorization": token },
+        },
+        { actorType: "user", actorId: userId },
+      );
+
+    const first = await connect("github_pat_first");
+    // The grant row's database default keeps microseconds; the retry must
+    // still recognize the version it just read.
+    await db.execute(
+      sql`update connection_grants set updated_at = now() - interval '1 second' + interval '123 microseconds' where connection_id = ${first.connectionId}`,
+    );
+    const retried = await connect("github_pat_second");
+
+    expect(retried.connectionId).toBe(first.connectionId);
+    const { grants } = await service.listConnectionGrants(
+      first.connectionId,
+      company.id,
+    );
+    expect(grants).toHaveLength(1);
+    expect(grants[0]).toMatchObject({ kind: "user", status: "active" });
+  });
+
+  it("stores a pasted GitHub token for a dedicated agent on that agent's grant", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const service = createTestToolAccessService(db);
+    mockToolsList([
+      { name: "get_file_contents", annotations: { readOnlyHint: true } },
+    ]);
+
+    const connected = await service.connectGalleryApp(
+      company.id,
+      {
+        galleryKey: "github",
+        connectionMethodKey: "mcp-key",
+        grantKind: "agent",
+        subjectAgentId: agent.id,
+        credentialValues: { "credentials.authorization": "github_pat_robot" },
+      },
+      { actorType: "user", actorId: "board" },
+    );
+
+    const connection = await service.getConnection(
+      connected.connectionId,
+      company.id,
+    );
+    expect(connection).toMatchObject({
+      credentialPolicy: "per_agent",
+      credentialSecretRefs: [],
+    });
+    const { grants } = await service.listConnectionGrants(
+      connected.connectionId,
+      company.id,
+    );
+    expect(grants).toHaveLength(1);
+    expect(grants[0]).toMatchObject({
+      kind: "agent",
+      subjectAgentId: agent.id,
+      status: "active",
+      providerTenant: {
+        github: { login: "octocat", credentialKind: "personal_access_token" },
+      },
+    });
+    expect(grants[0]!.credentialSecretRefs).toHaveLength(1);
+  });
+
+  it("rejects a GitHub token that GitHub does not accept before storing it", async () => {
+    const company = await createCompany(db);
+    const service = createTestToolAccessService(db);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 }),
+    );
+    const secretsBefore = await db
+      .select({ id: companySecrets.id })
+      .from(companySecrets)
+      .where(eq(companySecrets.companyId, company.id));
+
+    await expect(
+      service.connectGalleryApp(
+        company.id,
+        {
+          galleryKey: "github",
+          connectionMethodKey: "mcp-key",
+          grantKind: "user",
+          credentialValues: { "credentials.authorization": "github_pat_revoked" },
+        },
+        { actorType: "user", actorId: "board" },
+      ),
+    ).rejects.toMatchObject({
+      status: 422,
+      details: { code: "github_token_invalid" },
+    });
+
+    const secretsAfter = await db
+      .select({ id: companySecrets.id })
+      .from(companySecrets)
+      .where(eq(companySecrets.companyId, company.id));
+    expect(secretsAfter).toEqual(secretsBefore);
+    const connections = await db
+      .select({ id: toolConnections.id })
+      .from(toolConnections)
+      .where(eq(toolConnections.companyId, company.id));
+    expect(connections).toEqual([]);
   });
 
   it("reconnects a personal key on the existing user grant without creating an organization credential", async () => {
