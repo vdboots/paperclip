@@ -100,13 +100,14 @@ OAuth. Production must advertise the `github.code` profile (see Cloud's
 preserves the sign-in intent and offers a retry instead of silently switching
 to a personal access token. A successful retry preserves the chosen audience.
 
-## GitHub Actions tools
+## GitHub Actions and Discussions tools
 
-Managed and PAT connections request `X-MCP-Toolsets: default,actions` for MCP
-discovery and invocation. GitHub's default catalog excludes Actions; granting
-Actions permissions alone does not expose workflow tools. Existing connections
-can use **Refresh actions** after upgrading to discover the added tools.
-The normal catalog, access, approval, and quarantine rules still apply.
+Managed and PAT connections request `X-MCP-Toolsets: default,actions,discussions`
+for MCP discovery and invocation. GitHub's default catalog excludes Actions and
+Discussions; granting the matching permissions alone does not expose those
+tools. Existing connections can use **Refresh actions** after upgrading to
+discover the added tools. The normal catalog, access, approval, and quarantine
+rules still apply.
 
 To dispatch an existing workflow, use `actions_run_trigger` with
 `method: "run_workflow"`, the repository owner and name, `workflow_id`, `ref`,
@@ -119,6 +120,14 @@ effect. Paperclip's action controls do not grant GitHub permissions.
 The tool also supports rerunning and cancelling runs and deleting run logs.
 It retains GitHub's destructive classification. Read tools include
 `actions_list`, `actions_get`, and `get_job_logs`.
+
+Discussions read tools are `list_discussions`, `get_discussion`,
+`get_discussion_comments`, and `list_discussion_categories`. The
+`discussion_comment_write` tool adds, replies to, updates, and deletes
+discussion comments, and marks or unmarks an answer. GitHub's MCP server has no
+tool that creates a discussion. The GitHub App installation or fine-grained PAT
+needs **Discussions: Read** to read and **Discussions: Read and write** to
+comment. The repository must have Discussions enabled.
 
 Provider references: [MCP toolset configuration](https://github.com/github/github-mcp-server/blob/main/docs/server-configuration.md)
 and [workflow dispatch permissions](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event).

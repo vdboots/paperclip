@@ -14501,7 +14501,7 @@ describeEmbeddedPostgres("tool access service", () => {
     });
   });
 
-  it("discovers GitHub Actions tools during PAT setup and legacy catalog refresh", async () => {
+  it("discovers GitHub Actions and Discussions tools during PAT setup and legacy catalog refresh", async () => {
     const company = await createCompany(db);
     const service = createTestToolAccessService(db);
     const fetchMock = mockToolsList([
@@ -14510,6 +14510,7 @@ describeEmbeddedPostgres("tool access service", () => {
         name: "actions_run_trigger",
         annotations: { readOnlyHint: false, destructiveHint: true },
       },
+      { name: "list_discussions", annotations: { readOnlyHint: true } },
     ]);
     const actor = { actorType: "user" as const, actorId: "board" };
     const connected = await service.connectGalleryApp(company.id, {
@@ -14520,6 +14521,7 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(connected.catalog).toEqual(expect.arrayContaining([
       expect.objectContaining({ toolName: "actions_list", riskLevel: "read" }),
       expect.objectContaining({ toolName: "actions_run_trigger", riskLevel: "destructive" }),
+      expect.objectContaining({ toolName: "list_discussions", riskLevel: "read" }),
     ]));
 
     const setupRequestCount = fetchMock.mock.calls.length;
@@ -14531,7 +14533,7 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(fetchMock.mock.calls.length).toBeGreaterThan(setupRequestCount);
     for (const [url, init] of fetchMock.mock.calls) {
       expect(url).toBe("https://api.githubcopilot.com/mcp/");
-      expect(new Headers(init?.headers).get("X-MCP-Toolsets")).toBe("default,actions");
+      expect(new Headers(init?.headers).get("X-MCP-Toolsets")).toBe("default,actions,discussions");
       expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer github-actions-test-token");
     }
     expect(JSON.stringify(connected)).not.toContain("github-actions-test-token");
@@ -18096,14 +18098,14 @@ describe("classifyRisk", () => {
 
 describe("projectedConnectionHeaders", () => {
   it.each([undefined, "managed", "mcp-key"])(
-    "adds Actions to the default GitHub toolsets for method %s without saved configuration",
+    "adds Actions and Discussions to the default GitHub toolsets for method %s without saved configuration",
     (connectionMethodKey) => {
       const connection = {
         transport: "mcp_remote",
         config: { sourceTemplateKey: "github", connectionMethodKey },
       } as typeof toolConnections.$inferSelect;
       expect(projectedConnectionHeaders(connection)).toEqual({
-        "X-MCP-Toolsets": "default,actions",
+        "X-MCP-Toolsets": "default,actions,discussions",
       });
       expect(connection.config).not.toHaveProperty("headers");
     },
@@ -18116,7 +18118,7 @@ describe("projectedConnectionHeaders", () => {
       transportConfig: { sourceTemplateKey: "github" },
     } as typeof toolConnections.$inferSelect;
     expect(projectedConnectionHeaders(connection)).toEqual({
-      "X-MCP-Toolsets": "default,actions",
+      "X-MCP-Toolsets": "default,actions,discussions",
     });
   });
 

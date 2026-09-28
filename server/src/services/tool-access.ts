@@ -1203,9 +1203,10 @@ export function projectedConnectionHeaders(
     connection.transport === "mcp_remote" &&
     (sourceTemplateKey === "github" || connection.transportConfig?.sourceTemplateKey === "github")
   ) {
-    // GitHub excludes Actions from its default catalog. Project this on every
-    // discovery and invocation so existing connections gain the toolset too.
-    headers["X-MCP-Toolsets"] = "default,actions";
+    // GitHub excludes Actions and Discussions from its default catalog.
+    // Project this on every discovery and invocation so existing connections
+    // gain the toolsets too.
+    headers["X-MCP-Toolsets"] = "default,actions,discussions";
   }
   return headers;
 }
