@@ -2123,7 +2123,7 @@ rl.on("line", (line) => {
     const { run } = await createIssueAndRun(db, company.id, agent.id);
     const parameters = { method: "run_workflow", owner: "example", repo: "release", workflow_id: "nightly.yml", ref: "main" };
     const fake = await startFakeRemoteMcpServer((fakeRequest) => {
-      expect(fakeRequest.headers["x-mcp-toolsets"]).toBe("default,actions");
+      expect(fakeRequest.headers["x-mcp-toolsets"]).toBe("default,actions,discussions");
       expect(fakeRequest.body).toMatchObject({
         method: "tools/call",
         params: { name: "actions_run_trigger", arguments: parameters },
