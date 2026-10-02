@@ -21,6 +21,8 @@ const managedApi = vi.hoisted(() => ({
   cancelLocalLogin: vi.fn(async () => ({})),
   connectLocal: vi.fn(async () => ({ connectionId: "local-connection", grantId: "local-grant" })),
   create: vi.fn(async () => ({ connectionId: "managed-connection", grantId: "managed-grant" })),
+  setDefault: vi.fn(async () => ({})),
+  loginResult: vi.fn(async () => ({ connectionId: "login-connection", grantId: "login-grant" })),
 }));
 vi.mock("@/api/ai-connections", () => ({ aiConnectionsApi: managedApi }));
 vi.mock("../api/auth", async (importOriginal) => {
@@ -934,6 +936,7 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
 
         expect(managedApi.create).toHaveBeenCalledTimes(1);
         expect(managedApi.create).toHaveBeenCalledWith("company-new", expect.objectContaining({ provider: "anthropic", method: "api_key", ownership: "personal", apiKey: KEY }));
+        expect(managedApi.setDefault).toHaveBeenCalledWith("company-new", "managed-grant");
         const hireBody = (mockAgentsApi.hire.mock.calls.at(-1) as unknown[])[1] as { runtimeConfig: { aiConnection: unknown }; adapterConfig: { env?: Record<string, unknown> } };
         expect(hireBody.runtimeConfig.aiConnection).toEqual({ provider: "anthropic", method: "api_key", mode: "responsible_user" });
         expect(hireBody.adapterConfig.env?.ANTHROPIC_API_KEY).toBeUndefined();
@@ -3151,6 +3154,8 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
           await settle();
           expectTesting();
           expect(managedApi.connectLocal).toHaveBeenCalledTimes(1);
+          // Saving never replaces a stale default; onboarding selects the new account.
+          expect(managedApi.setDefault).toHaveBeenCalledWith("company-new", "local-grant");
           expect(mockAgentsApi.testEnvironment).toHaveBeenCalledTimes(1);
           expect(mockAgentsApi.hire).not.toHaveBeenCalled();
           await act(async () => finish(passed));

@@ -21,6 +21,7 @@ const managedApi = vi.hoisted(() => ({
   checkLocalLogin: vi.fn(async () => ({ status: "sign_in_required" as const })),
   cancelLocalLogin: vi.fn(async () => ({})),
   create: vi.fn(async () => ({ connectionId: "managed-connection", grantId: "managed-grant" })),
+  setDefault: vi.fn(async () => ({})),
 }));
 vi.mock("@/api/ai-connections", () => ({ aiConnectionsApi: managedApi }));
 vi.mock("@/api/agents", () => ({
@@ -317,6 +318,37 @@ describe("AgentProviderConnection reuse", () => {
       await vi.waitFor(() => expect(onComplete).toHaveBeenCalledWith({ connectionId: "login-account", grantId: "login-grant", method: "subscription" }));
       expect(managedApi.loginResult).toHaveBeenCalledWith("c1", "session-1");
     } finally { open.mockRestore(); }
+  });
+
+  it("selects a new browser-login account as the default before adopting the binding", async () => {
+    const { connected } = await mount("claude_local", false, true, true, false);
+    openProvider();
+    flushSync(() => mocks.loginPanel.mock.calls.at(-1)![0].onConnected("session-1"));
+    await vi.waitFor(() => expect(connected).toHaveBeenCalledWith({ env: {}, aiConnection: { provider: "anthropic", method: "subscription", mode: "responsible_user" } }));
+    expect(managedApi.loginResult).toHaveBeenCalledWith("c1", "session-1");
+    expect(managedApi.setDefault).toHaveBeenCalledWith("c1", "login-grant");
+    expect(managedApi.setDefault.mock.invocationCallOrder[0]).toBeLessThan(connected.mock.invocationCallOrder[0]);
+  });
+
+  it("keeps a browser-login account unadopted when selecting it as the default fails", async () => {
+    managedApi.setDefault.mockRejectedValueOnce(new Error("Reconnect this account before making it your default"));
+    const { connected } = await mount("claude_local", false, true, true, false);
+    openProvider();
+    flushSync(() => mocks.loginPanel.mock.calls.at(-1)![0].onConnected("session-1"));
+    await vi.waitFor(() => expect(host.textContent).toContain("Reconnect this account before making it your default"));
+    expect(connected).not.toHaveBeenCalled();
+  });
+
+  it("selects a new local-login account as the default before testing it", async () => {
+    managedApi.startLocalLogin.mockResolvedValue({ sessionId: "local-attempt", command: "CODEX_HOME='/isolated/codex' codex login --device-auth", expiresAt: "2099-01-01T00:00:00Z" });
+    managedApi.checkLocalLogin.mockResolvedValue({ status: "ready" } as never);
+    const { test } = await mount("codex_local", false, false, false, false, false, undefined, true);
+    openProvider();
+    await vi.waitFor(() => expect(managedApi.checkLocalLogin).toHaveBeenCalled());
+    click("Connect");
+    await vi.waitFor(() => expect(test).toHaveBeenCalledWith({ env: {}, aiConnection: { provider: "openai", method: "subscription", mode: "responsible_user" } }));
+    expect(managedApi.setDefault).toHaveBeenCalledWith("c1", "local-grant");
+    expect(managedApi.setDefault.mock.invocationCallOrder[0]).toBeLessThan(test.mock.invocationCallOrder[0]);
   });
 
   it("does not advance after Back while the saved login result is loading", async () => {

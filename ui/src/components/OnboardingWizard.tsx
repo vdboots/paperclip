@@ -761,6 +761,8 @@ function OnboardingWizardInner({
    */
   const apiKeySecretRef = useRef<{ key: string; companyId: string; envKey: string; binding?: Awaited<ReturnType<typeof storeProviderApiKey>>["binding"]; aiConnection?: AiConnectionBinding } | null>(null);
   const managedSubscriptionRef = useRef<{ companyId: string; binding: AiConnectionBinding } | null>(null);
+  // A browser sign-in that saved a new account; the hire selects it as default.
+  const pendingDefaultLoginRef = useRef<{ companyId: string; sessionId: string } | null>(null);
   const managedProvider = aiProviderForAdapter(adapterType);
   function managedBindingForStep(): AiConnectionBinding | undefined {
     if (credentialMode === "api") return selectedApiKey?.aiConnection ?? (
@@ -1798,7 +1800,9 @@ function OnboardingWizardInner({
     if (apiKeySecretRef.current?.key === key && apiKeySecretRef.current.companyId === companyId && apiKeySecretRef.current.envKey === envKey) return true;
     try {
       if (managedProvider) {
-        await aiConnectionsApi.create(companyId, { provider: managedProvider, method: "api_key", name: `My ${CONNECT_SOURCE_NAMES[adapterType] ?? managedProvider} API`, ownership: "personal", apiKey: key, agentIds: [], allAgents: true });
+        const created = await aiConnectionsApi.create(companyId, { provider: managedProvider, method: "api_key", name: `My ${CONNECT_SOURCE_NAMES[adapterType] ?? managedProvider} API`, ownership: "personal", apiKey: key, agentIds: [], allAgents: true });
+        // Saving never replaces an existing default, which may need attention.
+        await aiConnectionsApi.setDefault(companyId, created.grantId);
         apiKeySecretRef.current = { key, companyId, envKey, aiConnection: { provider: managedProvider, method: "api_key", mode: "responsible_user" } };
         return true;
       }
@@ -2094,9 +2098,19 @@ function OnboardingWizardInner({
         if (!apiKeyStored || !isCurrent()) return;
       }
       if (credentialMode !== "api" && canUseLocalLogin && managedProvider && !managedBindingForStep() && !savedSubscription && !savedKeys.storedLogin.data) {
-        await localLogin.connect();
+        const saved = await localLogin.connect();
+        // Saving never replaces an existing default, which may need attention.
+        // Completion is idempotent, so a failed selection retries safely.
+        await aiConnectionsApi.setDefault(createdCompanyId, saved.grantId);
         if (!isCurrent()) return;
         managedSubscriptionRef.current = { companyId: createdCompanyId, binding: { provider: managedProvider, method: "subscription", mode: "responsible_user" } };
+      }
+      const pendingDefaultLogin = pendingDefaultLoginRef.current;
+      if (pendingDefaultLogin?.companyId === createdCompanyId) {
+        const saved = await aiConnectionsApi.loginResult(createdCompanyId, pendingDefaultLogin.sessionId);
+        await aiConnectionsApi.setDefault(createdCompanyId, saved.grantId);
+        if (!isCurrent()) return;
+        pendingDefaultLoginRef.current = null;
       }
       const managedBinding = managedBindingForStep();
       const baseAdapterConfig = buildAdapterConfig(apiKeyStored);
@@ -2849,8 +2863,9 @@ function OnboardingWizardInner({
                             phaseBeforeSubmitRef.current === "ready" ? "ready" : "waiting",
                           );
                         }}
-                        onConnected={() => {
+                        onConnected={(sessionId) => {
                           if (managedProvider) managedSubscriptionRef.current = { companyId: createdCompanyId, binding: { provider: managedProvider, method: "subscription", mode: "responsible_user" } };
+                          if (managedProvider && sessionId) pendingDefaultLoginRef.current = { companyId: createdCompanyId, sessionId };
                           setConnectAuthUrl(null);
                           // Not into a card the customer has left. The panel is
                           // still mounted through Back's exit, and a login that

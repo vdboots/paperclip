@@ -69,6 +69,14 @@ setup shows an agent-access checkbox, enabled for all company agents by default
 for connection managers. The owner can limit access to the current agent. This access applies only to
 the owner's tasks. Reconnect never expands existing access.
 
+Onboarding and New Agent setup follow the same rule. A new personal account
+created there (local terminal sign-in, browser sign-in, or API key) is selected
+as the user's provider default before the responsible-user binding is tested or
+hired. Otherwise a stale default that needs attention would keep resolving and
+the step would fail with "Reconnect or validate the selected AI account". A
+failed default update stops the step with its error; local sign-in completion is
+idempotent, so retrying does not create another account.
+
 ## Storage and API
 
 AI connections pair `connectionPurpose: ai` with `transport: runtime_auth`.

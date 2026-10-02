@@ -191,10 +191,13 @@ export function AgentProviderConnection({
             };
       if (method === "subscription" && canUseLocalLogin && !savedSubscription && !storedLogin.data) {
         savedManagedAccount.current ??= await localLogin.connect();
+        // Saving never replaces an existing default, which may need attention.
+        await aiConnectionsApi.setDefault(companyId, savedManagedAccount.current.grantId);
         connection = { env: {}, aiConnection: { provider: aiProvider, method: "subscription", mode: "responsible_user" } };
       }
       if (connection.credentials) {
-        await aiConnectionsApi.create(companyId, { provider: aiProvider, method: "api_key", name: `My ${provider} API`, ownership: "personal", apiKey: connection.credentials[envKey], agentIds: [], allAgents: true });
+        const created = await aiConnectionsApi.create(companyId, { provider: aiProvider, method: "api_key", name: `My ${provider} API`, ownership: "personal", apiKey: connection.credentials[envKey], agentIds: [], allAgents: true });
+        await aiConnectionsApi.setDefault(companyId, created.grantId);
         connection = { env: {}, aiConnection: { provider: aiProvider, method: "api_key", mode: "responsible_user" } };
       }
       if (run !== epoch.current) return;
@@ -362,8 +365,22 @@ export function AgentProviderConnection({
                     return;
                   }
                   const connection: ProviderConnection = { env: {}, aiConnection: { provider: aiProvider, method: "subscription", mode: "responsible_user" } };
-                  setStoredConnection(connection);
-                  onConnected(connection);
+                  const adopt = () => {
+                    setStoredConnection(connection);
+                    onConnected(connection);
+                  };
+                  if (!sessionId) { adopt(); return; }
+                  // Saving never replaces an existing default, which may need attention.
+                  const run = epoch.current;
+                  setLoginPhase("connecting");
+                  void aiConnectionsApi.loginResult(companyId, sessionId)
+                    .then((result) => aiConnectionsApi.setDefault(companyId, result.grantId))
+                    .then(() => { if (run === epoch.current) adopt(); })
+                    .catch((cause) => {
+                      if (run !== epoch.current) return;
+                      setLoginPhase("ready");
+                      setError(cause instanceof Error ? cause.message : "Could not select the new account as your default. Try again.");
+                    });
                 }}
               />
             ) : savedSubscription ? null : canUseLocalLogin && !storedLogin.data ? (
